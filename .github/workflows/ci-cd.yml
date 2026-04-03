@@ -1,0 +1,207 @@
+# CI/CD for ai-monitoring-elasticsearch - mirrors ai-monitoring-postgresql workflow
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  issue_comment:
+    types: [created]
+
+env:
+  NAMESPACE: ai-monitoring
+
+jobs:
+  detect-deployment-target:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/deploy')
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    outputs:
+      target: ${{ steps.parse.outputs.target }}
+      pr_sha: ${{ steps.pr.outputs.sha }}
+    steps:
+      - name: Check commenter permission
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const { data: p } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner, repo: context.repo.repo,
+              username: context.payload.comment.user.login
+            });
+            if (!['admin', 'write'].includes(p.permission)) core.setFailed('Write access required');
+
+      - name: Get PR
+        id: pr
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const pr = await github.rest.pulls.get({ owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number });
+            core.setOutput('sha', pr.data.merged ? pr.data.merge_commit_sha : pr.data.head.sha);
+
+      - name: Parse target
+        id: parse
+        env:
+          B: ${{ github.event.comment.body }}
+        run: |
+          if echo "$B" | grep -qiE '^/deploy\s+(aks|openshift|oc)\s*$'; then
+            T=$(echo "$B" | grep -oiE '(aks|openshift|oc)' | head -1 | tr '[:upper:]' '[:lower:]')
+            [ "$T" = "oc" ] && T=openshift
+            echo "target=$T" >> $GITHUB_OUTPUT
+          else
+            echo "Use: /deploy aks or /deploy openshift"; exit 1
+          fi
+
+      - name: React
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              comment_id: context.payload.comment.id, content: 'rocket'
+            });
+
+  validate-helm:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: azure/setup-helm@5119fcb9089d432beecbf79bb2c7915207344b78
+        with:
+          version: v3.13.0
+      - run: helm repo add bitnami https://charts.bitnami.com/bitnami && helm repo update
+      - run: helm template elasticsearch bitnami/elasticsearch -n ai-monitoring -f deployments/elasticsearch-values.yaml > /dev/null && echo "OK"
+
+  deploy-openshift:
+    needs: [detect-deployment-target]
+    runs-on: oc-run
+    if: needs.detect-deployment-target.outputs.target == 'openshift'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.detect-deployment-target.outputs.pr_sha }}
+
+      - run: oc login --token=${{ secrets.OPENSHIFT_TOKEN }} --server=${{ secrets.OPENSHIFT_SERVER }} && oc project ${{ secrets.OPENSHIFT_PROJECT }}
+
+      - name: Ensure secret
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+        run: |
+          NS=${{ secrets.OPENSHIFT_PROJECT }}
+          oc create namespace $NS 2>/dev/null || true
+          RP="${REDIS_PASSWORD:-$DB_PASSWORD}"
+          RQP="${RABBITMQ_PASSWORD:-$DB_PASSWORD}"
+          kubectl create secret generic ai-monitoring-secrets -n $NS \
+            --from-literal=db-username=admin \
+            --from-literal=db-password="$DB_PASSWORD" \
+            --from-literal=postgres-password="$DB_PASSWORD" \
+            --from-literal=password="$DB_PASSWORD" \
+            --from-literal=elasticsearch-username=elastic \
+            --from-literal=elasticsearch-password="$DB_PASSWORD" \
+            --from-literal=redis-password="$RP" \
+            --from-literal=rabbitmq-username=user \
+            --from-literal=rabbitmq-password="$RQP" \
+            --from-literal=jwt-secret="$JWT_SECRET" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - run: helm repo add bitnami https://charts.bitnami.com/bitnami && helm repo update
+      - run: helm upgrade --install elasticsearch bitnami/elasticsearch -n ${{ secrets.OPENSHIFT_PROJECT }} -f deployments/elasticsearch-values.yaml --wait --timeout 5m
+
+      - run: oc get pods -n ${{ secrets.OPENSHIFT_PROJECT }} -l app.kubernetes.io/name=elasticsearch
+
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+              body: '✅ Elasticsearch deployed to OpenShift!'
+            });
+
+      - if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+              body: `❌ OpenShift deploy failed. [Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+            });
+
+  deploy-aks:
+    needs: [detect-deployment-target]
+    runs-on: ubuntu-latest
+    if: needs.detect-deployment-target.outputs.target == 'aks'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.detect-deployment-target.outputs.pr_sha }}
+
+      - uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - uses: azure/setup-helm@5119fcb9089d432beecbf79bb2c7915207344b78
+        with:
+          version: v3.13.0
+
+      - uses: azure/setup-kubectl@3e0aec4d80787158d308d7b364cb1b702e7feb7f
+        with:
+          version: 'v1.28.0'
+
+      - run: az aks get-credentials --resource-group ${{ secrets.AKS_RESOURCE_GROUP }} --name ${{ secrets.AKS_CLUSTER_NAME }} --overwrite-existing
+
+      - run: kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Ensure secret
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+        run: |
+          RP="${REDIS_PASSWORD:-$DB_PASSWORD}"
+          RQP="${RABBITMQ_PASSWORD:-$DB_PASSWORD}"
+          kubectl create secret generic ai-monitoring-secrets -n ${{ env.NAMESPACE }} \
+            --from-literal=db-username=admin \
+            --from-literal=db-password="$DB_PASSWORD" \
+            --from-literal=postgres-password="$DB_PASSWORD" \
+            --from-literal=password="$DB_PASSWORD" \
+            --from-literal=elasticsearch-username=elastic \
+            --from-literal=elasticsearch-password="$DB_PASSWORD" \
+            --from-literal=redis-password="$RP" \
+            --from-literal=rabbitmq-username=user \
+            --from-literal=rabbitmq-password="$RQP" \
+            --from-literal=jwt-secret="$JWT_SECRET" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - run: helm repo add bitnami https://charts.bitnami.com/bitnami && helm repo update
+      - run: helm upgrade --install elasticsearch bitnami/elasticsearch -n ${{ env.NAMESPACE }} -f deployments/elasticsearch-values.yaml --wait --timeout 5m
+
+      - run: kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=elasticsearch
+
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+              body: '✅ Elasticsearch deployed to AKS!'
+            });
+
+      - if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+              body: `❌ AKS deploy failed. [Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+            });
