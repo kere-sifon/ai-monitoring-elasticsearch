@@ -2,7 +2,7 @@
 
 Elasticsearch for the AI Log Monitoring system (log indexing and search). Deploys via Bitnami Helm chart.
 
-**Default branch:** `develop` (match this in GitHub repository settings → Default branch).
+
 
 ## Prerequisite
 
