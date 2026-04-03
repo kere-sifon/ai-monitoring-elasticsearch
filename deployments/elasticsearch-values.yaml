@@ -10,7 +10,11 @@ volumePermissions:
   image:
     repository: bitnamilegacy/os-shell
     tag: "12-debian-12-r50"
+# Disable privileged sysctl init (sets vm.max_map_count); it breaks PodSecurity "restricted"
+# (privileged/root). Ensure nodes satisfy Elasticsearch (e.g. vm.max_map_count >= 262144) via
+# MachineConfig / Node Tuning Operator on OpenShift, or tune at the host level.
 sysctlImage:
+  enabled: false
   repository: bitnamilegacy/os-shell
   tag: "12-debian-12-r50"
 
