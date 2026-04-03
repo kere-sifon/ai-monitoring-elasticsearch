@@ -99,7 +99,7 @@ jobs:
           oc create namespace $NS 2>/dev/null || true
           RP="${REDIS_PASSWORD:-$DB_PASSWORD}"
           RQP="${RABBITMQ_PASSWORD:-$DB_PASSWORD}"
-          kubectl create secret generic ai-monitoring-secrets -n $NS \
+          oc create secret generic ai-monitoring-secrets -n $NS \
             --from-literal=db-username=admin \
             --from-literal=db-password="$DB_PASSWORD" \
             --from-literal=postgres-password="$DB_PASSWORD" \
@@ -110,7 +110,7 @@ jobs:
             --from-literal=rabbitmq-username=user \
             --from-literal=rabbitmq-password="$RQP" \
             --from-literal=jwt-secret="$JWT_SECRET" \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --dry-run=client -o yaml | oc apply -f -
 
       - run: helm repo add bitnami https://charts.bitnami.com/bitnami && helm repo update
       - run: helm upgrade --install elasticsearch bitnami/elasticsearch -n ${{ secrets.OPENSHIFT_PROJECT }} -f deployments/elasticsearch-values.yaml --wait --timeout 5m
