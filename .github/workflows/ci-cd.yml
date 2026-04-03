@@ -113,7 +113,11 @@ jobs:
             --dry-run=client -o yaml | oc apply -f -
 
       - run: helm repo add bitnami https://charts.bitnami.com/bitnami && helm repo update
-      - run: helm upgrade --install elasticsearch bitnami/elasticsearch -n ${{ secrets.OPENSHIFT_PROJECT }} -f deployments/elasticsearch-values.yaml --wait --timeout 5m
+
+      - name: Clear stuck Helm release if needed
+        run: chmod +x deployments/helm-clear-stuck-release.sh && bash deployments/helm-clear-stuck-release.sh elasticsearch "${{ secrets.OPENSHIFT_PROJECT }}"
+
+      - run: helm upgrade --install elasticsearch bitnami/elasticsearch -n ${{ secrets.OPENSHIFT_PROJECT }} -f deployments/elasticsearch-values.yaml --atomic --wait --timeout 5m
 
       - run: oc get pods -n ${{ secrets.OPENSHIFT_PROJECT }} -l app.kubernetes.io/name=elasticsearch
 
@@ -185,7 +189,11 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - run: helm repo add bitnami https://charts.bitnami.com/bitnami && helm repo update
-      - run: helm upgrade --install elasticsearch bitnami/elasticsearch -n ${{ env.NAMESPACE }} -f deployments/elasticsearch-values.yaml --wait --timeout 5m
+
+      - name: Clear stuck Helm release if needed
+        run: chmod +x deployments/helm-clear-stuck-release.sh && bash deployments/helm-clear-stuck-release.sh elasticsearch "${{ env.NAMESPACE }}"
+
+      - run: helm upgrade --install elasticsearch bitnami/elasticsearch -n ${{ env.NAMESPACE }} -f deployments/elasticsearch-values.yaml --atomic --wait --timeout 5m
 
       - run: kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=elasticsearch
 
