@@ -19,6 +19,8 @@ sysctlImage:
   tag: "12-debian-12-r50"
 
 master:
+  # Required for single-node: master must hold data when data.replicaCount is 0 (default chart value is masterOnly: true).
+  masterOnly: false
   replicaCount: 1
   persistence:
     enabled: true
